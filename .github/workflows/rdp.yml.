@@ -1,0 +1,179 @@
+name: Windows RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rdp:
+    name: Secure RDP session
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure Windows RDP securely
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Enable Remote Desktop and require Network Level Authentication (NLA).
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
+
+          # Make sure the built-in runner account is allowed to use RDP.
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+
+          # RDP service.
+          Set-Service -Name "TermService" -StartupType Automatic
+          if ((Get-Service -Name "TermService").Status -ne "Running") {
+            Start-Service -Name "TermService"
+          }
+
+          # Do not expose TCP/UDP 3389 broadly. Allow it only from Tailscale's CGNAT range.
+          Get-NetFirewallRule -DisplayName "GitHub RDP over Tailscale only" -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+          New-NetFirewallRule `
+            -DisplayName "GitHub RDP over Tailscale only" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol TCP `
+            -LocalPort 3389 `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any | Out-Null
+
+          New-NetFirewallRule `
+            -DisplayName "GitHub RDP over Tailscale only UDP" `
+            -Direction Inbound `
+            -Action Allow `
+            -Protocol UDP `
+            -LocalPort 3389 `
+            -RemoteAddress "100.64.0.0/10" `
+            -Profile Any | Out-Null
+
+          Write-Host "RDP configured with NLA and Tailscale-only firewall access."
+
+      - name: Set runneradmin password
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Missing repository secret: RDP_PASSWORD"
+          }
+
+          if ($env:RDP_PASSWORD.Length -lt 16) {
+            throw "RDP_PASSWORD must be at least 16 characters."
+          }
+
+          $secure = ConvertTo-SecureString $env:RDP_PASSWORD -AsPlainText -Force
+          Set-LocalUser -Name "runneradmin" -Password $secure
+          Write-Host "RDP password configured."
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+            - name: Verify Tailscale and RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Write-Host "===== TAILSCALE STATUS ====="
+          tailscale status
+
+          $tsIp = (tailscale ip -4 | Select-Object -First 1).Trim()
+
+          if ([string]::IsNullOrWhiteSpace($tsIp)) {
+            throw "Could not determine the Tailscale IPv4 address."
+          }
+
+          Write-Host ""
+          Write-Host "===== TAILSCALE IPv4 ====="
+          Write-Host $tsIp
+
+          Write-Host ""
+          Write-Host "===== COMPUTER ====="
+          $hostName = hostname
+          Write-Host $hostName
+
+          Write-Host ""
+          Write-Host "===== RDP USER ====="
+          Write-Host "runneradmin"
+
+          Write-Host ""
+          Write-Host "===== RDP PORT CHECK ====="
+          $listener = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+
+          if (-not $listener) {
+            throw "RDP is not listening on TCP 3389."
+          }
+
+          Write-Host "TCP 3389 is listening."
+
+          $localTest = Test-NetConnection `
+            -ComputerName "127.0.0.1" `
+            -Port 3389 `
+            -InformationLevel Quiet
+
+          if (-not $localTest) {
+            throw "Local TCP 3389 test failed."
+          }
+
+          Write-Host "Local TCP 3389 test passed."
+
+          $summary = @(
+            "### RDP connection details"
+            ""
+            "- PC / Address: $tsIp"
+            "- Username: runneradmin"
+            "- Port: 3389"
+            "- Tailscale: Connected"
+          )
+
+          $summary | Out-File `
+            -FilePath $env:GITHUB_STEP_SUMMARY `
+            -Append `
+            -Encoding utf8
+
+          Write-Host ""
+          Write-Host "Connect from a Tailscale-connected device using:"
+          Write-Host "  Address: $tsIp"
+          Write-Host "  User:    runneradmin"
+
+      - name: Keep RDP session alive for up to 6 hours
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $end = (Get-Date).AddHours(6)
+
+          while ((Get-Date) -lt $end) {
+            $remaining = $end - (Get-Date)
+
+            # Keep RDP available if the service is accidentally stopped.
+            $svc = Get-Service -Name "TermService"
+            if ($svc.Status -ne "Running") {
+              Write-Host "TermService is not running; restarting it."
+              Start-Service -Name "TermService"
+            }
+
+            # Keep the runner's Tailscale node observable.
+            tailscale status | Select-Object -First 3
+
+            Write-Host ("RDP active. Remaining: {0:hh\:mm\:ss}" -f $remaining)
+            Start-Sleep -Seconds 60
+          }
+
+          Write-Host "Six-hour session limit reached."
