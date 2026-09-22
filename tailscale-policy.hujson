@@ -1,0 +1,16 @@
+{
+  // Example only. Merge the relevant sections into your existing tailnet policy.
+  // Do not replace a production policy blindly.
+
+  "tagOwners": {
+    "tag:github-rdp": ["autogroup:admin"]
+  },
+
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["autogroup:member"],
+      "dst": ["tag:github-rdp:*"]
+    }
+  ]
+}
