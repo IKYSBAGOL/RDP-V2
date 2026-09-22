@@ -86,7 +86,7 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-      - name: Verify Tailscale and RDP
+            - name: Verify Tailscale and RDP
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -95,6 +95,7 @@ jobs:
           tailscale status
 
           $tsIp = (tailscale ip -4 | Select-Object -First 1).Trim()
+
           if ([string]::IsNullOrWhiteSpace($tsIp)) {
             throw "Could not determine the Tailscale IPv4 address."
           }
@@ -115,23 +116,37 @@ jobs:
           Write-Host ""
           Write-Host "===== RDP PORT CHECK ====="
           $listener = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+
           if (-not $listener) {
             throw "RDP is not listening on TCP 3389."
           }
+
           Write-Host "TCP 3389 is listening."
 
-          $localTest = Test-NetConnection -ComputerName "127.0.0.1" -Port 3389 -InformationLevel Quiet
+          $localTest = Test-NetConnection `
+            -ComputerName "127.0.0.1" `
+            -Port 3389 `
+            -InformationLevel Quiet
+
           if (-not $localTest) {
             throw "Local TCP 3389 test failed."
           }
+
           Write-Host "Local TCP 3389 test passed."
 
-          "### RDP connection details" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **PC / Address:** `$tsIp`" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **Username:** `runneradmin`" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **Port:** `3389`" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          "- **Tailscale:** Connected" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          $summary = @(
+            "### RDP connection details"
+            ""
+            "- PC / Address: $tsIp"
+            "- Username: runneradmin"
+            "- Port: 3389"
+            "- Tailscale: Connected"
+          )
+
+          $summary | Out-File `
+            -FilePath $env:GITHUB_STEP_SUMMARY `
+            -Append `
+            -Encoding utf8
 
           Write-Host ""
           Write-Host "Connect from a Tailscale-connected device using:"
