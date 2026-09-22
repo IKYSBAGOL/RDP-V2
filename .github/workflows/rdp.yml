@@ -86,7 +86,75 @@ jobs:
         with:
           authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
 
-            - name: Verify Tailscale and RDP
+            name: Windows RDP via Tailscale
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rdp:
+    name: Secure RDP session
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Enable RDP
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" `
+            -Name "fDenyTSConnections" `
+            -Value 0
+
+          Set-ItemProperty `
+            -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" `
+            -Name "UserAuthentication" `
+            -Value 1
+
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+          Set-Service -Name TermService -StartupType Manual
+          Start-Service -Name TermService
+
+          Write-Host "RDP enabled."
+
+      - name: Set RDP password
+        shell: powershell
+        env:
+          RDP_PASSWORD: ${{ secrets.RDP_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:RDP_PASSWORD)) {
+            throw "Missing RDP_PASSWORD secret."
+          }
+
+          if ($env:RDP_PASSWORD.Length -lt 16) {
+            throw "RDP_PASSWORD must be at least 16 characters."
+          }
+
+          $securePassword = ConvertTo-SecureString `
+            $env:RDP_PASSWORD `
+            -AsPlainText `
+            -Force
+
+          Set-LocalUser `
+            -Name "runneradmin" `
+            -Password $securePassword
+
+          Write-Host "RDP password configured."
+
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+
+      - name: Verify RDP and Tailscale
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -97,7 +165,7 @@ jobs:
           $tsIp = (tailscale ip -4 | Select-Object -First 1).Trim()
 
           if ([string]::IsNullOrWhiteSpace($tsIp)) {
-            throw "Could not determine the Tailscale IPv4 address."
+            throw "Could not get Tailscale IPv4 address."
           }
 
           Write-Host ""
@@ -106,16 +174,19 @@ jobs:
 
           Write-Host ""
           Write-Host "===== COMPUTER ====="
-          $hostName = hostname
-          Write-Host $hostName
+          hostname
 
           Write-Host ""
           Write-Host "===== RDP USER ====="
           Write-Host "runneradmin"
 
           Write-Host ""
-          Write-Host "===== RDP PORT CHECK ====="
-          $listener = Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue
+          Write-Host "===== RDP PORT ====="
+
+          $listener = Get-NetTCPConnection `
+            -LocalPort 3389 `
+            -State Listen `
+            -ErrorAction SilentlyContinue
 
           if (-not $listener) {
             throw "RDP is not listening on TCP 3389."
@@ -123,35 +194,41 @@ jobs:
 
           Write-Host "TCP 3389 is listening."
 
-          $localTest = Test-NetConnection `
+          $test = Test-NetConnection `
             -ComputerName "127.0.0.1" `
             -Port 3389 `
             -InformationLevel Quiet
 
-          if (-not $localTest) {
-            throw "Local TCP 3389 test failed."
+          if (-not $test) {
+            throw "RDP port test failed."
           }
 
-          Write-Host "Local TCP 3389 test passed."
-
-          $summary = @(
-            "### RDP connection details"
-            ""
-            "- PC / Address: $tsIp"
-            "- Username: runneradmin"
-            "- Port: 3389"
-            "- Tailscale: Connected"
-          )
-
-          $summary | Out-File `
-            -FilePath $env:GITHUB_STEP_SUMMARY `
-            -Append `
-            -Encoding utf8
+          Write-Host "RDP port test passed."
 
           Write-Host ""
-          Write-Host "Connect from a Tailscale-connected device using:"
-          Write-Host "  Address: $tsIp"
-          Write-Host "  User:    runneradmin"
+          Write-Host "===== CONNECTION INFO ====="
+          Write-Host "Address: $tsIp"
+          Write-Host "User: runneradmin"
+          Write-Host "Port: 3389"
+
+      - name: Keep RDP alive for 6 hours
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $endTime = (Get-Date).AddHours(6)
+
+          while ((Get-Date) -lt $endTime) {
+            $remaining = $endTime - (Get-Date)
+
+            Write-Host (
+              "RDP active. Remaining: {0:hh\:mm\:ss}" -f $remaining
+            )
+
+            Start-Sleep -Seconds 60
+          }
+
+          Write-Host "Six-hour session finished."
 
       - name: Keep RDP session alive for up to 6 hours
         shell: powershell
